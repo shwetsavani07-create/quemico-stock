@@ -9,9 +9,8 @@
     "lint": "eslint"
   },
   "dependencies": {
-    "@prisma/client": "^7.9.1",
+    "mongoose": "^8.24.3",
     "next": "16.3.1",
-    "prisma": "^6.12.0",
     "react": "19.2.8",
     "react-dom": "19.2.8"
   },
