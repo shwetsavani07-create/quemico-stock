@@ -5,7 +5,12 @@ import { redirect } from "next/navigation";
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { randomUUID } from "node:crypto";
-import { prisma } from "@/lib/prisma";
+import { connectDB } from "@/lib/mongodb";
+import {
+  Product,
+  StockBatch,
+  StockMovement,
+} from "@/lib/models";
 import { addStock, sellStock, StockError } from "@/lib/fifo";
 import {
   parseNonNegativeInteger,
@@ -57,27 +62,28 @@ export async function createProductAction(
   const imageFile = formData.get("image");
 
   try {
+    await connectDB();
+
     let imagePath: string | undefined;
 
     if (imageFile instanceof File && imageFile.size > 0) {
       imagePath = await saveProductImage(imageFile);
     }
 
-    const product = await prisma.product.create({
-      data: {
-        name,
-        lowStockThreshold: threshold,
-        image: imagePath,
-      },
+    const product = await Product.create({
+      name,
+      lowStockThreshold: threshold,
+      image: imagePath,
     });
 
-    revalidateInventoryPaths(product.id);
-    redirect(`/products/${product.id}`);
+    revalidateInventoryPaths(product._id.toString());
+    redirect(`/products/${product._id.toString()}`);
   } catch (error) {
     if (isRedirectError(error)) {
       throw error;
     }
 
+    console.error("[actions] createProductAction failed:", error);
     return {
       success: false,
       message: "Unable to create product. Please try again.",
@@ -111,15 +117,15 @@ export async function updateProductAction(
   const removeImage = formData.get("removeImage") === "true";
 
   try {
-    const existing = await prisma.product.findUnique({
-      where: { id: productId },
-    });
+    await connectDB();
+
+    const existing = await Product.findById(productId);
 
     if (!existing) {
       return { success: false, message: "Product not found." };
     }
 
-    let image = existing.image;
+    let image = existing.image ?? null;
 
     if (removeImage) {
       image = null;
@@ -129,13 +135,10 @@ export async function updateProductAction(
       image = await saveProductImage(imageFile);
     }
 
-    await prisma.product.update({
-      where: { id: productId },
-      data: {
-        name,
-        lowStockThreshold: threshold,
-        image,
-      },
+    await Product.findByIdAndUpdate(productId, {
+      name,
+      lowStockThreshold: threshold,
+      image,
     });
 
     revalidateInventoryPaths(productId);
@@ -145,6 +148,7 @@ export async function updateProductAction(
       throw error;
     }
 
+    console.error("[actions] updateProductAction failed:", error);
     return {
       success: false,
       message: "Unable to update product. Please try again.",
@@ -157,7 +161,14 @@ export async function deleteProductAction(
   _formData: FormData,
 ): Promise<void> {
   try {
-    await prisma.product.delete({ where: { id: productId } });
+    await connectDB();
+
+    await Promise.all([
+      StockMovement.deleteMany({ productId }),
+      StockBatch.deleteMany({ productId }),
+    ]);
+    await Product.findByIdAndDelete(productId);
+
     revalidateInventoryPaths();
     redirect("/products");
   } catch (error) {
@@ -165,6 +176,7 @@ export async function deleteProductAction(
       throw error;
     }
 
+    console.error("[actions] deleteProductAction failed:", error);
     throw new Error("Unable to delete product. Please try again.");
   }
 }
@@ -199,6 +211,7 @@ export async function addStockAction(
       return { success: false, message: error.message };
     }
 
+    console.error("[actions] addStockAction failed:", error);
     return {
       success: false,
       message: "Unable to add stock. Please try again.",
@@ -226,6 +239,7 @@ export async function sellStockAction(
       return { success: false, message: error.message };
     }
 
+    console.error("[actions] sellStockAction failed:", error);
     return {
       success: false,
       message: "Unable to sell stock. Please try again.",

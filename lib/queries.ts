@@ -1,92 +1,138 @@
-import { prisma } from "@/lib/prisma";
+import { connectDB } from "@/lib/mongodb";
+import {
+  Product,
+  StockBatch,
+  StockMovement,
+  toProductRecord,
+} from "@/lib/models";
 import {
   getAllProductsWithStock,
   getProductWithStock,
 } from "@/lib/fifo";
-import { decimalToNumber } from "@/lib/utils";
 import type { StockMovementWithProduct } from "@/types";
 
-export async function fetchDashboardData() {
-  const [summary, products] = await Promise.all([
-    import("@/lib/fifo").then((mod) => mod.getDashboardSummary()),
-    getAllProductsWithStock(),
-  ]);
+function mapMovement(
+  movement: {
+    _id: { toString(): string };
+    productId: { toString(): string } | string;
+    type: "ADD" | "SELL";
+    quantity: number;
+    value: number;
+    pricePerPiece?: number | null;
+    createdAt: Date;
+    allocations?: Array<{
+      _id?: { toString(): string };
+      batchId: { toString(): string } | string;
+      quantity: number;
+      pricePerPiece: number;
+      value: number;
+    }>;
+  },
+  productName: string,
+): StockMovementWithProduct {
+  return {
+    id: movement._id.toString(),
+    productId:
+      typeof movement.productId === "string"
+        ? movement.productId
+        : movement.productId.toString(),
+    productName,
+    type: movement.type,
+    quantity: movement.quantity,
+    value: movement.value,
+    pricePerPiece: movement.pricePerPiece ?? null,
+    createdAt: movement.createdAt,
+    allocations: (movement.allocations ?? []).map((allocation, index) => ({
+      id: allocation._id?.toString() ?? `${movement._id.toString()}-${index}`,
+      quantity: allocation.quantity,
+      pricePerPiece: allocation.pricePerPiece,
+      value: allocation.value,
+    })),
+  };
+}
 
-  return { summary, products };
+export async function fetchDashboardData() {
+  try {
+    const [summary, products] = await Promise.all([
+      import("@/lib/fifo").then((mod) => mod.getDashboardSummary()),
+      getAllProductsWithStock(),
+    ]);
+
+    return { summary, products };
+  } catch (error) {
+    console.error("[queries] fetchDashboardData failed:", error);
+    throw error;
+  }
 }
 
 export async function fetchProducts(search?: string) {
-  const products = await getAllProductsWithStock();
+  try {
+    const products = await getAllProductsWithStock();
 
-  if (!search?.trim()) {
-    return products;
+    if (!search?.trim()) {
+      return products;
+    }
+
+    const query = search.trim().toLowerCase();
+    return products.filter((product) =>
+      product.name.toLowerCase().includes(query),
+    );
+  } catch (error) {
+    console.error("[queries] fetchProducts failed:", error);
+    throw error;
   }
-
-  const query = search.trim().toLowerCase();
-  return products.filter((product) =>
-    product.name.toLowerCase().includes(query),
-  );
 }
 
 export async function fetchProductById(id: string) {
-  const product = await prisma.product.findUnique({ where: { id } });
+  try {
+    await connectDB();
 
-  if (!product) {
-    return null;
+    const product = await Product.findById(id);
+
+    if (!product) {
+      return null;
+    }
+
+    const productRecord = toProductRecord(product);
+
+    const [withStock, batches, movements] = await Promise.all([
+      getProductWithStock(productRecord),
+      StockBatch.find({ productId: id, remainingQuantity: { $gt: 0 } })
+        .sort({ createdAt: 1 })
+        .lean(),
+      fetchProductMovements(id),
+    ]);
+
+    return {
+      product: withStock,
+      batches: batches.map((batch) => ({
+        id: batch._id.toString(),
+        quantity: batch.quantity,
+        remainingQuantity: batch.remainingQuantity,
+        pricePerPiece: batch.pricePerPiece,
+        createdAt: batch.createdAt,
+      })),
+      movements,
+    };
+  } catch (error) {
+    console.error("[queries] fetchProductById failed:", error);
+    throw error;
   }
-
-  const [withStock, batches, movements] = await Promise.all([
-    getProductWithStock(product),
-    prisma.stockBatch.findMany({
-      where: { productId: id, remainingQuantity: { gt: 0 } },
-      orderBy: { createdAt: "asc" },
-    }),
-    fetchProductMovements(id),
-  ]);
-
-  return {
-    product: withStock,
-    batches: batches.map((batch) => ({
-      id: batch.id,
-      quantity: batch.quantity,
-      remainingQuantity: batch.remainingQuantity,
-      pricePerPiece: decimalToNumber(batch.pricePerPiece),
-      createdAt: batch.createdAt,
-    })),
-    movements,
-  };
 }
 
 export async function fetchProductMovements(
   productId: string,
 ): Promise<StockMovementWithProduct[]> {
-  const movements = await prisma.stockMovement.findMany({
-    where: { productId },
-    include: {
-      product: { select: { name: true } },
-      allocations: true,
-    },
-    orderBy: { createdAt: "desc" },
+  await connectDB();
+
+  const product = await Product.findById(productId).select("name");
+  const movements = await StockMovement.find({ productId }).sort({
+    createdAt: -1,
   });
 
-  return movements.map((movement) => ({
-    id: movement.id,
-    productId: movement.productId,
-    productName: movement.product.name,
-    type: movement.type,
-    quantity: movement.quantity,
-    value: decimalToNumber(movement.value),
-    pricePerPiece: movement.pricePerPiece
-      ? decimalToNumber(movement.pricePerPiece)
-      : null,
-    createdAt: movement.createdAt,
-    allocations: movement.allocations.map((allocation) => ({
-      id: allocation.id,
-      quantity: allocation.quantity,
-      pricePerPiece: decimalToNumber(allocation.pricePerPiece),
-      value: decimalToNumber(allocation.value),
-    })),
-  }));
+  return movements.map((movement) =>
+    mapMovement(movement, product?.name ?? "Unknown"),
+  );
 }
 
 export async function fetchStockHistory(options?: {
@@ -94,52 +140,61 @@ export async function fetchStockHistory(options?: {
   type?: "ADD" | "SELL";
   sort?: "newest" | "oldest";
 }) {
-  const movements = await prisma.stockMovement.findMany({
-    where: {
-      ...(options?.productId ? { productId: options.productId } : {}),
-      ...(options?.type ? { type: options.type } : {}),
-    },
-    include: {
-      product: { select: { name: true } },
-      allocations: true,
-    },
-    orderBy: {
-      createdAt: options?.sort === "oldest" ? "asc" : "desc",
-    },
+  await connectDB();
+
+  const filter: Record<string, unknown> = {};
+
+  if (options?.productId) {
+    filter.productId = options.productId;
+  }
+
+  if (options?.type) {
+    filter.type = options.type;
+  }
+
+  const movements = await StockMovement.find(filter).sort({
+    createdAt: options?.sort === "oldest" ? 1 : -1,
   });
 
-  return movements.map((movement) => ({
-    id: movement.id,
-    productId: movement.productId,
-    productName: movement.product.name,
-    type: movement.type,
-    quantity: movement.quantity,
-    value: decimalToNumber(movement.value),
-    pricePerPiece: movement.pricePerPiece
-      ? decimalToNumber(movement.pricePerPiece)
-      : null,
-    createdAt: movement.createdAt,
-    allocations: movement.allocations.map((allocation) => ({
-      id: allocation.id,
-      quantity: allocation.quantity,
-      pricePerPiece: decimalToNumber(allocation.pricePerPiece),
-      value: decimalToNumber(allocation.value),
-    })),
-  })) satisfies StockMovementWithProduct[];
+  const productIds = [...new Set(movements.map((m) => m.productId.toString()))];
+  const products = await Product.find({ _id: { $in: productIds } }).select(
+    "name",
+  );
+  const productMap = new Map(
+    products.map((product) => [product._id.toString(), product.name]),
+  );
+
+  return movements.map((movement) =>
+    mapMovement(
+      movement,
+      productMap.get(movement.productId.toString()) ?? "Unknown",
+    ),
+  ) satisfies StockMovementWithProduct[];
 }
 
 export async function fetchLowStockProducts() {
-  const products = await getAllProductsWithStock();
+  try {
+    const products = await getAllProductsWithStock();
 
-  return {
-    lowStock: products.filter((product) => product.status === "LOW_STOCK"),
-    outOfStock: products.filter((product) => product.status === "OUT_OF_STOCK"),
-  };
+    return {
+      lowStock: products.filter((product) => product.status === "LOW_STOCK"),
+      outOfStock: products.filter(
+        (product) => product.status === "OUT_OF_STOCK",
+      ),
+    };
+  } catch (error) {
+    console.error("[queries] fetchLowStockProducts failed:", error);
+    throw error;
+  }
 }
 
 export async function fetchProductOptions() {
-  return prisma.product.findMany({
-    select: { id: true, name: true },
-    orderBy: { name: "asc" },
-  });
+  await connectDB();
+
+  const products = await Product.find().select("name").sort({ name: 1 });
+
+  return products.map((product) => ({
+    id: product._id.toString(),
+    name: product.name,
+  }));
 }

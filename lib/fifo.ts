@@ -1,12 +1,17 @@
-import { Prisma } from "@/lib/generated/prisma/client";
-import { prisma } from "@/lib/prisma";
+import mongoose from "mongoose";
+import { connectDB } from "@/lib/mongodb";
+import {
+  Product,
+  StockBatch,
+  StockMovement,
+  toProductRecord,
+} from "@/lib/models";
 import {
   calculateStockFromBatches,
   consumeFifoBatches,
   StockError,
 } from "@/lib/fifo-core";
 import { getStockStatus } from "@/lib/stock-status";
-import { decimalToNumber } from "@/lib/utils";
 import type {
   DashboardSummary,
   FifoBatch,
@@ -20,16 +25,16 @@ export {
   consumeFifoBatches,
 } from "@/lib/fifo-core";
 
-export function toFifoBatch(batch: {
-  id: string;
+function toFifoBatch(batch: {
+  _id: mongoose.Types.ObjectId;
   remainingQuantity: number;
-  pricePerPiece: Prisma.Decimal;
+  pricePerPiece: number;
   createdAt: Date;
 }): FifoBatch {
   return {
-    id: batch.id,
+    id: batch._id.toString(),
     remainingQuantity: batch.remainingQuantity,
-    pricePerPiece: decimalToNumber(batch.pricePerPiece),
+    pricePerPiece: batch.pricePerPiece,
     createdAt: batch.createdAt,
   };
 }
@@ -37,24 +42,31 @@ export function toFifoBatch(batch: {
 export async function getRemainingBatches(
   productId: string,
 ): Promise<FifoBatch[]> {
-  const batches = await prisma.stockBatch.findMany({
-    where: {
-      productId,
-      remainingQuantity: { gt: 0 },
-    },
-    orderBy: { createdAt: "asc" },
-  });
+  await connectDB();
 
-  return batches.map(toFifoBatch);
+  const batches = await StockBatch.find({
+    productId,
+    remainingQuantity: { $gt: 0 },
+  })
+    .sort({ createdAt: 1 })
+    .lean();
+
+  return batches.map((batch) =>
+    toFifoBatch({
+      _id: batch._id,
+      remainingQuantity: batch.remainingQuantity,
+      pricePerPiece: batch.pricePerPiece,
+      createdAt: batch.createdAt,
+    }),
+  );
 }
 
 export async function getCurrentStock(
   productId: string,
 ): Promise<ProductStockSummary> {
-  const product = await prisma.product.findUnique({
-    where: { id: productId },
-    select: { lowStockThreshold: true },
-  });
+  await connectDB();
+
+  const product = await Product.findById(productId).select("lowStockThreshold");
 
   if (!product) {
     throw new StockError("Product not found.");
@@ -88,37 +100,53 @@ export async function addStock(
     throw new StockError("Please enter a valid price.");
   }
 
-  const product = await prisma.product.findUnique({
-    where: { id: productId },
-    select: { id: true },
-  });
+  await connectDB();
+
+  const product = await Product.findById(productId).select("_id");
 
   if (!product) {
     throw new StockError("Product not found.");
   }
 
   const totalValue = quantity * pricePerPiece;
+  const session = await mongoose.startSession();
 
-  return prisma.$transaction(async (tx) => {
-    await tx.stockBatch.create({
-      data: {
-        productId,
-        quantity,
-        remainingQuantity: quantity,
-        pricePerPiece,
-      },
-    });
+  try {
+    session.startTransaction();
 
-    return tx.stockMovement.create({
-      data: {
-        productId,
-        type: "ADD",
-        quantity,
-        value: totalValue,
-        pricePerPiece,
-      },
-    });
-  });
+    await StockBatch.create(
+      [
+        {
+          productId,
+          quantity,
+          remainingQuantity: quantity,
+          pricePerPiece,
+        },
+      ],
+      { session },
+    );
+
+    const [movement] = await StockMovement.create(
+      [
+        {
+          productId,
+          type: "ADD",
+          quantity,
+          value: totalValue,
+          pricePerPiece,
+        },
+      ],
+      { session },
+    );
+
+    await session.commitTransaction();
+    return movement;
+  } catch (error) {
+    await session.abortTransaction();
+    throw error;
+  } finally {
+    session.endSession();
+  }
 }
 
 export async function sellStock(productId: string, quantityToSell: number) {
@@ -126,23 +154,25 @@ export async function sellStock(productId: string, quantityToSell: number) {
     throw new StockError("Please enter a valid quantity.");
   }
 
-  const product = await prisma.product.findUnique({
-    where: { id: productId },
-    select: { id: true },
-  });
+  await connectDB();
+
+  const product = await Product.findById(productId).select("_id");
 
   if (!product) {
     throw new StockError("Product not found.");
   }
 
-  return prisma.$transaction(async (tx) => {
-    const batches = await tx.stockBatch.findMany({
-      where: {
-        productId,
-        remainingQuantity: { gt: 0 },
-      },
-      orderBy: { createdAt: "asc" },
-    });
+  const session = await mongoose.startSession();
+
+  try {
+    session.startTransaction();
+
+    const batches = await StockBatch.find({
+      productId,
+      remainingQuantity: { $gt: 0 },
+    })
+      .sort({ createdAt: 1 })
+      .session(session);
 
     const fifoBatches = batches.map(toFifoBatch);
     const { allocations, totalValue } = consumeFifoBatches(
@@ -151,51 +181,49 @@ export async function sellStock(productId: string, quantityToSell: number) {
     );
 
     for (const allocation of allocations) {
-      await tx.stockBatch.update({
-        where: { id: allocation.batchId },
-        data: {
-          remainingQuantity: {
-            decrement: allocation.quantity,
-          },
+      await StockBatch.findByIdAndUpdate(
+        allocation.batchId,
+        { $inc: { remainingQuantity: -allocation.quantity } },
+        { session },
+      );
+    }
+
+    const [movement] = await StockMovement.create(
+      [
+        {
+          productId,
+          type: "SELL",
+          quantity: quantityToSell,
+          value: totalValue,
+          allocations: allocations.map((allocation) => ({
+            batchId: allocation.batchId,
+            quantity: allocation.quantity,
+            pricePerPiece: allocation.pricePerPiece,
+            value: allocation.value,
+          })),
         },
-      });
-    }
+      ],
+      { session },
+    );
 
-    const movement = await tx.stockMovement.create({
-      data: {
-        productId,
-        type: "SELL",
-        quantity: quantityToSell,
-        value: totalValue,
-      },
-    });
-
-    if (allocations.length > 0) {
-      await tx.stockMovementAllocation.createMany({
-        data: allocations.map((allocation) => ({
-          movementId: movement.id,
-          batchId: allocation.batchId,
-          quantity: allocation.quantity,
-          pricePerPiece: allocation.pricePerPiece,
-          value: allocation.value,
-        })),
-      });
-    }
-
+    await session.commitTransaction();
     return movement;
-  });
+  } catch (error) {
+    await session.abortTransaction();
+    throw error;
+  } finally {
+    session.endSession();
+  }
 }
 
-export async function getProductWithStock(
-  product: {
-    id: string;
-    name: string;
-    image: string | null;
-    lowStockThreshold: number;
-    createdAt: Date;
-    updatedAt: Date;
-  },
-): Promise<ProductWithStock> {
+export async function getProductWithStock(product: {
+  id: string;
+  name: string;
+  image: string | null;
+  lowStockThreshold: number;
+  createdAt: Date;
+  updatedAt: Date;
+}): Promise<ProductWithStock> {
   const batches = await getRemainingBatches(product.id);
   const { quantity, value } = calculateStockFromBatches(batches);
 
@@ -208,11 +236,13 @@ export async function getProductWithStock(
 }
 
 export async function getAllProductsWithStock(): Promise<ProductWithStock[]> {
-  const products = await prisma.product.findMany({
-    orderBy: { name: "asc" },
-  });
+  await connectDB();
 
-  return Promise.all(products.map((product) => getProductWithStock(product)));
+  const products = await Product.find().sort({ name: 1 });
+
+  return Promise.all(
+    products.map((product) => getProductWithStock(toProductRecord(product))),
+  );
 }
 
 export async function getDashboardSummary(): Promise<DashboardSummary> {
