@@ -27,11 +27,10 @@ export function ProductForm({
   const [state, formAction, pending] = useActionState(action, null);
 
   return (
-    <form
-      action={formAction}
-      encType="multipart/form-data"
-      className="space-y-5 rounded-2xl border border-border bg-white p-6 shadow-sm"
-    >
+      <form
+          action={formAction}
+          className="space-y-5 rounded-2xl border border-border bg-white p-6 shadow-sm"
+      >
       <Input
         label="Product Name"
         name="name"
