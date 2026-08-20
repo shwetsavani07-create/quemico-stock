@@ -1,9 +1,6 @@
 import dns from "node:dns";
 import mongoose from "mongoose";
 
-// Use reliable public DNS — some local/IPv6 resolvers fail MongoDB Atlas SRV lookups.
-dns.setServers(["8.8.8.8", "8.8.4.4", "1.1.1.1"]);
-
 interface MongooseCache {
   conn: typeof mongoose | null;
   promise: Promise<typeof mongoose> | null;
@@ -20,32 +17,14 @@ const cached: MongooseCache = global.mongooseCache ?? {
 
 global.mongooseCache = cached;
 
+const PUBLIC_DNS = ["8.8.8.8", "8.8.4.4", "1.1.1.1"];
+
 function getMongoErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     return `${error.name}: ${error.message}`;
   }
 
   return String(error);
-}
-
-function buildMongoUri(): string {
-  const directUri = process.env.MONGODB_URI?.trim();
-
-  if (directUri) {
-    return ensureAtlasOptions(directUri);
-  }
-
-  const username = process.env.MONGODB_USERNAME?.trim();
-  const password = process.env.MONGODB_PASSWORD;
-  const host = process.env.MONGODB_HOST?.trim();
-  const dbName = process.env.MONGODB_DB?.trim() ?? "quemico-stock";
-
-  if (username && password && host) {
-    const uri = `mongodb+srv://${encodeURIComponent(username)}:${encodeURIComponent(password)}@${host}/${dbName}?retryWrites=true&w=majority`;
-    return ensureAtlasOptions(uri);
-  }
-
-  throw new Error("Please define the MONGODB_URI environment variable");
 }
 
 function ensureAtlasOptions(uri: string): string {
@@ -57,6 +36,56 @@ function ensureAtlasOptions(uri: string): string {
   return `${uri}${separator}authSource=admin`;
 }
 
+function resolveSrvRecords(host: string): Promise<dns.SrvRecord[]> {
+  const resolver = new dns.Resolver();
+  resolver.setServers(PUBLIC_DNS);
+
+  return new Promise((resolve, reject) => {
+    resolver.resolveSrv(`_mongodb._tcp.${host}`, (error, addresses) => {
+      if (error) {
+        reject(error);
+        return;
+      }
+
+      resolve(addresses);
+    });
+  });
+}
+
+async function buildMongoUri(): Promise<string> {
+  const directUri = process.env.MONGODB_URI?.trim();
+
+  if (directUri) {
+    return ensureAtlasOptions(directUri);
+  }
+
+  const username = process.env.MONGODB_USERNAME?.trim();
+  const password = process.env.MONGODB_PASSWORD;
+  const host = process.env.MONGODB_HOST?.trim();
+  const dbName = process.env.MONGODB_DB?.trim() ?? "quemico-stock";
+
+  if (!username || !password || !host) {
+    throw new Error(
+      "Please define MONGODB_URI or MONGODB_USERNAME, MONGODB_PASSWORD, and MONGODB_HOST",
+    );
+  }
+
+  const encodedUser = encodeURIComponent(username);
+  const encodedPass = encodeURIComponent(password);
+
+  const records = await resolveSrvRecords(host);
+
+  if (records.length === 0) {
+    throw new Error("No MongoDB SRV records found for Atlas cluster");
+  }
+
+  const primary = [...records].sort(
+    (a, b) => a.priority - b.priority || b.weight - a.weight,
+  )[0];
+
+  return `mongodb://${encodedUser}:${encodedPass}@${primary.name}:${primary.port}/${dbName}?ssl=true&authSource=admin&directConnection=true`;
+}
+
 export async function connectDB(): Promise<typeof mongoose> {
   if (cached.conn) {
     return cached.conn;
@@ -65,7 +94,7 @@ export async function connectDB(): Promise<typeof mongoose> {
   let uri: string;
 
   try {
-    uri = buildMongoUri();
+    uri = await buildMongoUri();
     console.info("[mongodb] MongoDB config loaded: yes");
   } catch (error) {
     console.error("[mongodb] Connection failed:", getMongoErrorMessage(error));
@@ -87,6 +116,7 @@ export async function connectDB(): Promise<typeof mongoose> {
       })
       .catch((error) => {
         cached.promise = null;
+        cached.conn = null;
         console.error(
           "[mongodb] Connection failed:",
           getMongoErrorMessage(error),
@@ -99,6 +129,7 @@ export async function connectDB(): Promise<typeof mongoose> {
     cached.conn = await cached.promise;
   } catch (error) {
     cached.promise = null;
+    cached.conn = null;
     console.error("[mongodb] Connection failed:", getMongoErrorMessage(error));
     throw error;
   }
