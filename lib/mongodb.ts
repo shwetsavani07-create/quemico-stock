@@ -55,7 +55,8 @@ function resolveSrvRecords(host: string): Promise<dns.SrvRecord[]> {
 async function buildMongoUri(): Promise<string> {
   const directUri = process.env.MONGODB_URI?.trim();
 
-  if (directUri) {
+  // mongodb+srv requires system DNS SRV lookup — skip it and use component vars + custom resolver instead
+  if (directUri && !directUri.startsWith("mongodb+srv://")) {
     return ensureAtlasOptions(directUri);
   }
 
