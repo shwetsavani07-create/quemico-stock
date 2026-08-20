@@ -15,8 +15,12 @@ export default async function DashboardPage() {
     const data = await fetchDashboardData();
     summary = data.summary;
     products = data.products;
-  } catch {
+  } catch (error) {
     hasError = true;
+    console.error(
+      "[dashboard] Failed to load products:",
+      error instanceof Error ? `${error.name}: ${error.message}` : error,
+    );
   }
 
   if (hasError || !summary || !products) {

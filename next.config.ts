@@ -2,6 +2,7 @@ import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
   allowedDevOrigins: ["192.168.1.65"],
+  serverExternalPackages: ["mongoose"],
   headers: async () => [
     {
       source: "/sw.js",

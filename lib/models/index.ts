@@ -58,6 +58,8 @@ StockMovementSchema.index({ type: 1 });
 
 export type IProduct = InferSchemaType<typeof ProductSchema> & {
   _id: mongoose.Types.ObjectId;
+  createdAt: Date;
+  updatedAt: Date;
 };
 export type IStockBatch = InferSchemaType<typeof StockBatchSchema> & {
   _id: mongoose.Types.ObjectId;
