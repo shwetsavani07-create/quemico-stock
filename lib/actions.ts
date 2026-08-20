@@ -66,7 +66,7 @@ export async function createProductAction(
 
     let imagePath: string | undefined;
 
-    if (imageFile instanceof File && imageFile.size > 0) {
+    if (isUploadFile(imageFile)) {
       imagePath = await saveProductImage(imageFile);
     }
 
@@ -83,7 +83,11 @@ export async function createProductAction(
       throw error;
     }
 
-    console.error("[actions] createProductAction failed:", error);
+    if (error instanceof StockError) {
+      return { success: false, message: error.message };
+    }
+
+    logActionError("createProductAction", error);
     return {
       success: false,
       message: "Unable to create product. Please try again.",
@@ -131,7 +135,7 @@ export async function updateProductAction(
       image = null;
     }
 
-    if (imageFile instanceof File && imageFile.size > 0) {
+    if (isUploadFile(imageFile)) {
       image = await saveProductImage(imageFile);
     }
 
@@ -148,7 +152,11 @@ export async function updateProductAction(
       throw error;
     }
 
-    console.error("[actions] updateProductAction failed:", error);
+    if (error instanceof StockError) {
+      return { success: false, message: error.message };
+    }
+
+    logActionError("updateProductAction", error);
     return {
       success: false,
       message: "Unable to update product. Please try again.",
@@ -247,14 +255,82 @@ export async function sellStockAction(
   }
 }
 
-async function saveProductImage(file: File): Promise<string> {
-  const allowedTypes = ["image/jpeg", "image/png", "image/webp", "image/gif"];
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
 
-  if (!allowedTypes.includes(file.type)) {
-    throw new StockError("Please upload a valid image file.");
+const ALLOWED_IMAGE_TYPES = new Set([
+  "image/jpeg",
+  "image/jpg",
+  "image/pjpeg",
+  "image/png",
+  "image/webp",
+]);
+
+const EXTENSION_BY_MIME: Record<string, string> = {
+  "image/jpeg": "jpg",
+  "image/jpg": "jpg",
+  "image/pjpeg": "jpg",
+  "image/png": "png",
+  "image/webp": "webp",
+};
+
+function isUploadFile(value: FormDataEntryValue | null): value is File {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    "arrayBuffer" in value &&
+    typeof (value as File).arrayBuffer === "function" &&
+    (value as File).size > 0
+  );
+}
+
+function resolveImageMimeType(file: File): string | null {
+  const mimeType = file.type.trim().toLowerCase();
+
+  if (mimeType && ALLOWED_IMAGE_TYPES.has(mimeType)) {
+    return mimeType;
   }
 
-  const extension = file.type.split("/")[1] ?? "jpg";
+  const extension = path.extname(file.name).slice(1).toLowerCase();
+
+  if (extension === "jpg" || extension === "jpeg") {
+    return "image/jpeg";
+  }
+
+  if (extension === "png") {
+    return "image/png";
+  }
+
+  if (extension === "webp") {
+    return "image/webp";
+  }
+
+  return null;
+}
+
+function logActionError(action: string, error: unknown) {
+  if (error instanceof Error) {
+    console.error(`[actions] ${action} failed:`, {
+      name: error.name,
+      message: error.message,
+    });
+    return;
+  }
+
+  console.error(`[actions] ${action} failed:`, error);
+}
+
+async function saveProductImage(file: File): Promise<string> {
+  if (file.size > MAX_IMAGE_BYTES) {
+    throw new StockError("Image must be 5 MB or smaller.");
+  }
+
+  const mimeType = resolveImageMimeType(file);
+
+  if (!mimeType) {
+    throw new StockError("Please upload a JPG, PNG, or WEBP image.");
+  }
+
+  const extension = EXTENSION_BY_MIME[mimeType] ?? "jpg";
   const fileName = `${randomUUID()}.${extension}`;
   const uploadDir = path.join(process.cwd(), "public", "uploads", "products");
   const filePath = path.join(uploadDir, fileName);

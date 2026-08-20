@@ -27,7 +27,11 @@ export function ProductForm({
   const [state, formAction, pending] = useActionState(action, null);
 
   return (
-    <form action={formAction} className="space-y-5 rounded-2xl border border-border bg-white p-6 shadow-sm">
+    <form
+      action={formAction}
+      encType="multipart/form-data"
+      className="space-y-5 rounded-2xl border border-border bg-white p-6 shadow-sm"
+    >
       <Input
         label="Product Name"
         name="name"
@@ -57,7 +61,7 @@ export function ProductForm({
         <input
           type="file"
           name="image"
-          accept="image/jpeg,image/png,image/webp,image/gif"
+          accept="image/jpeg,image/jpg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
           className="block w-full rounded-xl border border-border bg-white px-3 py-2 text-sm"
         />
         {initialValues?.image ? (
