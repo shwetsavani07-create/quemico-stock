@@ -1,4 +1,3 @@
-import dns from "node:dns";
 import mongoose from "mongoose";
 
 interface MongooseCache {
@@ -7,6 +6,7 @@ interface MongooseCache {
 }
 
 declare global {
+  // eslint-disable-next-line no-var
   var mongooseCache: MongooseCache | undefined;
 }
 
@@ -17,7 +17,11 @@ const cached: MongooseCache = global.mongooseCache ?? {
 
 global.mongooseCache = cached;
 
-const PUBLIC_DNS = ["8.8.8.8", "8.8.4.4", "1.1.1.1"];
+const MONGODB_URI = process.env.MONGODB_URI?.trim();
+
+if (!MONGODB_URI) {
+  throw new Error("Please define the MONGODB_URI environment variable");
+}
 
 function getMongoErrorMessage(error: unknown): string {
   if (error instanceof Error) {
@@ -27,64 +31,22 @@ function getMongoErrorMessage(error: unknown): string {
   return String(error);
 }
 
-function ensureAtlasOptions(uri: string): string {
-  if (uri.includes("authSource=")) {
-    return uri;
+function buildMongoUri(uri: string): string {
+  let result = uri;
+
+  if (!result.includes("retryWrites=")) {
+    result += result.includes("?")
+        ? "&retryWrites=true"
+        : "?retryWrites=true";
   }
 
-  const separator = uri.includes("?") ? "&" : "?";
-  return `${uri}${separator}authSource=admin`;
-}
-
-function resolveSrvRecords(host: string): Promise<dns.SrvRecord[]> {
-  const resolver = new dns.Resolver();
-  resolver.setServers(PUBLIC_DNS);
-
-  return new Promise((resolve, reject) => {
-    resolver.resolveSrv(`_mongodb._tcp.${host}`, (error, addresses) => {
-      if (error) {
-        reject(error);
-        return;
-      }
-
-      resolve(addresses);
-    });
-  });
-}
-
-async function buildMongoUri(): Promise<string> {
-  const directUri = process.env.MONGODB_URI?.trim();
-
-  // mongodb+srv requires system DNS SRV lookup — skip it and use component vars + custom resolver instead
-  if (directUri && !directUri.startsWith("mongodb+srv://")) {
-    return ensureAtlasOptions(directUri);
+  if (!result.includes("w=")) {
+    result += result.includes("?")
+        ? "&w=majority"
+        : "?w=majority";
   }
 
-  const username = process.env.MONGODB_USERNAME?.trim();
-  const password = process.env.MONGODB_PASSWORD;
-  const host = process.env.MONGODB_HOST?.trim();
-  const dbName = process.env.MONGODB_DB?.trim() ?? "quemico-stock";
-
-  if (!username || !password || !host) {
-    throw new Error(
-      "Please define MONGODB_URI or MONGODB_USERNAME, MONGODB_PASSWORD, and MONGODB_HOST",
-    );
-  }
-
-  const encodedUser = encodeURIComponent(username);
-  const encodedPass = encodeURIComponent(password);
-
-  const records = await resolveSrvRecords(host);
-
-  if (records.length === 0) {
-    throw new Error("No MongoDB SRV records found for Atlas cluster");
-  }
-
-  const primary = [...records].sort(
-    (a, b) => a.priority - b.priority || b.weight - a.weight,
-  )[0];
-
-  return `mongodb://${encodedUser}:${encodedPass}@${primary.name}:${primary.port}/${dbName}?ssl=true&authSource=admin&directConnection=true`;
+  return result;
 }
 
 export async function connectDB(): Promise<typeof mongoose> {
@@ -92,38 +54,37 @@ export async function connectDB(): Promise<typeof mongoose> {
     return cached.conn;
   }
 
-  let uri: string;
-
-  try {
-    uri = await buildMongoUri();
-    console.info("[mongodb] MongoDB config loaded: yes");
-  } catch (error) {
-    console.error("[mongodb] Connection failed:", getMongoErrorMessage(error));
-    throw error;
-  }
+  const uri = buildMongoUri("MONGODB_URI");
 
   if (!cached.promise) {
+    console.info("[mongodb] Connecting to MongoDB Atlas...");
+
     cached.promise = mongoose
-      .connect(uri, {
-        serverSelectionTimeoutMS: 10000,
-        family: 4,
-      })
-      .then((connection) => {
-        console.info(
-          "[mongodb] Connected to MongoDB Atlas:",
-          connection.connection.name,
-        );
-        return connection;
-      })
-      .catch((error) => {
-        cached.promise = null;
-        cached.conn = null;
-        console.error(
-          "[mongodb] Connection failed:",
-          getMongoErrorMessage(error),
-        );
-        throw error;
-      });
+        .connect(uri, {
+          serverSelectionTimeoutMS: 15000,
+          socketTimeoutMS: 45000,
+          maxPoolSize: 10,
+          minPoolSize: 0,
+        })
+        .then((connection) => {
+          console.info(
+              "[mongodb] Connected successfully:",
+              connection.connection.name,
+          );
+
+          return connection;
+        })
+        .catch((error) => {
+          cached.promise = null;
+          cached.conn = null;
+
+          console.error(
+              "[mongodb] Connection failed:",
+              getMongoErrorMessage(error),
+          );
+
+          throw error;
+        });
   }
 
   try {
@@ -131,7 +92,6 @@ export async function connectDB(): Promise<typeof mongoose> {
   } catch (error) {
     cached.promise = null;
     cached.conn = null;
-    console.error("[mongodb] Connection failed:", getMongoErrorMessage(error));
     throw error;
   }
 
