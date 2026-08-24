@@ -246,16 +246,32 @@ export async function getAllProductsWithStock(): Promise<ProductWithStock[]> {
 }
 
 export async function getDashboardSummary(): Promise<DashboardSummary> {
+  await connectDB();
+
   const products = await getAllProductsWithStock();
+
+  const soldMovements = await StockMovement.find({
+    type: "SELL",
+  }).select("value");
+
+  const totalSellingStockValue = soldMovements.reduce(
+      (sum, movement) => sum + movement.value,
+      0,
+  );
 
   return {
     totalProducts: products.length,
     totalStock: products.reduce((sum, product) => sum + product.quantity, 0),
-    totalStockValue: products.reduce((sum, product) => sum + product.value, 0),
-    lowStockCount: products.filter((product) => product.status === "LOW_STOCK")
-      .length,
+    totalStockValue: products.reduce(
+        (sum, product) => sum + product.value,
+        0,
+    ),
+    totalSellingStockValue,
+    lowStockCount: products.filter(
+        (product) => product.status === "LOW_STOCK",
+    ).length,
     outOfStockCount: products.filter(
-      (product) => product.status === "OUT_OF_STOCK",
+        (product) => product.status === "OUT_OF_STOCK",
     ).length,
   };
 }

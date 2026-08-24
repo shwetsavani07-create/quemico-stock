@@ -24,6 +24,7 @@ export interface DashboardSummary {
   totalProducts: number;
   totalStock: number;
   totalStockValue: number;
+  totalSellingStockValue: number;
   lowStockCount: number;
   outOfStockCount: number;
 }
