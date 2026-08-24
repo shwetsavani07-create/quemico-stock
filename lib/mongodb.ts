@@ -1,3 +1,4 @@
+import dns from "node:dns";
 import mongoose from "mongoose";
 
 interface MongooseCache {
@@ -17,6 +18,12 @@ const cached: MongooseCache = global.mongooseCache ?? {
 
 global.mongooseCache = cached;
 
+// Use reliable public DNS servers for MongoDB SRV resolution.
+dns.setServers([
+  "8.8.8.8",
+  "8.8.4.4",
+]);
+
 function getMongoErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     return `${error.name}: ${error.message}`;
@@ -25,13 +32,15 @@ function getMongoErrorMessage(error: unknown): string {
   return String(error);
 }
 
-function getMongoUri(): string {
+export async function connectDB(): Promise<typeof mongoose> {
+  if (cached.conn) {
+    return cached.conn;
+  }
+
   const uri = process.env.MONGODB_URI?.trim();
 
   if (!uri) {
-    throw new Error(
-        "MONGODB_URI is missing. Please define it in .env.local.",
-    );
+    throw new Error("MONGODB_URI is not configured");
   }
 
   if (
@@ -39,22 +48,12 @@ function getMongoUri(): string {
       !uri.startsWith("mongodb+srv://")
   ) {
     throw new Error(
-        'Invalid MONGODB_URI. It must start with "mongodb://" or "mongodb+srv://".',
+        "MONGODB_URI must start with mongodb:// or mongodb+srv://",
     );
   }
 
-  return uri;
-}
-
-export async function connectDB(): Promise<typeof mongoose> {
-  if (cached.conn) {
-    return cached.conn;
-  }
-
-  const uri = getMongoUri();
-
   if (!cached.promise) {
-    console.log("[mongodb] Connecting to MongoDB...");
+    console.info("[mongodb] Connecting to MongoDB...");
 
     cached.promise = mongoose
         .connect(uri, {
@@ -65,7 +64,7 @@ export async function connectDB(): Promise<typeof mongoose> {
           family: 4,
         })
         .then((connection) => {
-          console.log(
+          console.info(
               "[mongodb] Connected successfully:",
               connection.connection.name,
           );
