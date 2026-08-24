@@ -31,6 +31,7 @@ export function ProductImage({
         src={src}
         alt={alt}
         fill
+        loading="eager"
         priority={priority}
         className="object-cover"
         sizes="(max-width: 768px) 100vw, 320px"

@@ -17,12 +17,6 @@ const cached: MongooseCache = global.mongooseCache ?? {
 
 global.mongooseCache = cached;
 
-const MONGODB_URI = process.env.MONGODB_URI?.trim();
-
-if (!MONGODB_URI) {
-  throw new Error("Please define the MONGODB_URI environment variable");
-}
-
 function getMongoErrorMessage(error: unknown): string {
   if (error instanceof Error) {
     return `${error.name}: ${error.message}`;
@@ -31,22 +25,25 @@ function getMongoErrorMessage(error: unknown): string {
   return String(error);
 }
 
-function buildMongoUri(uri: string): string {
-  let result = uri;
+function getMongoUri(): string {
+  const uri = process.env.MONGODB_URI?.trim();
 
-  if (!result.includes("retryWrites=")) {
-    result += result.includes("?")
-        ? "&retryWrites=true"
-        : "?retryWrites=true";
+  if (!uri) {
+    throw new Error(
+        "MONGODB_URI is missing. Please define it in .env.local.",
+    );
   }
 
-  if (!result.includes("w=")) {
-    result += result.includes("?")
-        ? "&w=majority"
-        : "?w=majority";
+  if (
+      !uri.startsWith("mongodb://") &&
+      !uri.startsWith("mongodb+srv://")
+  ) {
+    throw new Error(
+        'Invalid MONGODB_URI. It must start with "mongodb://" or "mongodb+srv://".',
+    );
   }
 
-  return result;
+  return uri;
 }
 
 export async function connectDB(): Promise<typeof mongoose> {
@@ -54,10 +51,10 @@ export async function connectDB(): Promise<typeof mongoose> {
     return cached.conn;
   }
 
-  const uri = buildMongoUri("MONGODB_URI");
+  const uri = getMongoUri();
 
   if (!cached.promise) {
-    console.info("[mongodb] Connecting to MongoDB Atlas...");
+    console.log("[mongodb] Connecting to MongoDB...");
 
     cached.promise = mongoose
         .connect(uri, {
@@ -65,9 +62,10 @@ export async function connectDB(): Promise<typeof mongoose> {
           socketTimeoutMS: 45000,
           maxPoolSize: 10,
           minPoolSize: 0,
+          family: 4,
         })
         .then((connection) => {
-          console.info(
+          console.log(
               "[mongodb] Connected successfully:",
               connection.connection.name,
           );
